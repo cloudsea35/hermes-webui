@@ -699,7 +699,8 @@ def get_agent_version() -> dict:
     with _AGENT_VERSION_CACHE_LOCK:
         cached = dict(_AGENT_VERSION_CACHE)
     age = now - cached.get('cached_at', 0)
-    if age >= _AGENT_VERSION_CACHE_TTL:
+    ttl = cached.get('ttl_seconds', _AGENT_VERSION_CACHE_TTL)
+    if age >= ttl:
         fresh = _detect_agent_version()
         with _AGENT_VERSION_CACHE_LOCK:
             _AGENT_VERSION_CACHE.update(fresh)
