@@ -9105,7 +9105,17 @@ async function loadSettingsPanel(){
     const agentBadge = $('settings-agent-version-badge');
     if(agentBadge){
       const agentVersion = (settings.agent_version || 'not detected').toString().trim() || 'not detected';
-      agentBadge.textContent = `Agent: ${agentVersion}`;
+      const provenance = settings.agent_provenance || 'unknown';
+      let provenanceBadge = '';
+      if (provenance === 'live') {
+        provenanceBadge = ' <span style="color:#4caf50" title="Live gateway version">✓</span>';
+      } else if (provenance === 'disk') {
+        provenanceBadge = ' <span style="color:#ffc107" title="Estimated (gateway unreachable)">~</span>';
+      }
+      agentBadge.textContent = `Agent: ${agentVersion}${provenanceBadge}`;
+      if (settings.agent_warning) {
+        agentBadge.title = settings.agent_warning;
+      }
     }
     // Hydrate appearance controls first so a slow /api/models request
     // cannot overwrite an in-progress theme/skin selection.

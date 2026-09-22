@@ -14047,13 +14047,20 @@ def handle_get(handler, parsed) -> bool:
         except Exception:
             pass
         # Inject the running version so the UI badge stays in sync with git tags
-        # without any manual release step.
+        # without any manual release step. (HGRC-015: live-health-first with provenance)
         try:
-            from api.updates import AGENT_VERSION, WEBUI_VERSION
+            from api.updates import get_agent_version, WEBUI_VERSION
+            agent_payload = get_agent_version()
             settings["webui_version"] = WEBUI_VERSION
-            settings["agent_version"] = AGENT_VERSION
+            settings["agent_version"] = agent_payload['version']
+            settings["agent_provenance"] = agent_payload['provenance']
+            settings["agent_source"] = agent_payload['source']
+            settings["agent_warning"] = agent_payload['warning']
+            settings["agent_error"] = agent_payload['error']
         except Exception:
-            pass
+            from api.updates import WEBUI_VERSION
+            settings["webui_version"] = WEBUI_VERSION
+            settings["agent_version"] = 'not detected'
         # Channel-scoped display badge — SEPARATE from webui_version (which is
         # load-bearing for asset cache-busting / SW cache / skew detection and
         # must stay channel-neutral). update_channel_version is display-only.

@@ -592,48 +592,132 @@ def _detect_agent_version_from_gateway_health(timeout: float = 0.75) -> str | No
     return None
 
 
-def _detect_agent_version() -> str:
-    """Detect the running Hermes Agent version for UI display."""
+def _detect_agent_version() -> dict:
+    """Detect the running Hermes Agent version with provenance metadata.
+
+    Priority: live gateway health → disk-derived fallback → unknown.
+    Returns dict with version, provenance, source, and diagnostic fields.
+    """
+    result = {
+        'version': 'unknown',
+        'provenance': 'unknown',
+        'source': None,
+        'warning': None,
+        'agent_dir': str(_AGENT_DIR) if _AGENT_DIR else None,
+        'gateway_url': None,
+        'error': None,
+    }
+
     agent_dir = Path(_AGENT_DIR) if _AGENT_DIR is not None else None
 
+    # ── Primary: live gateway health ──────────────────────────────────────
+    try:
+        gateway_version = _detect_agent_version_from_gateway_health()
+        if gateway_version:
+            result['version'] = gateway_version
+            result['provenance'] = 'live'
+            result['source'] = 'gateway_health'
+            result['gateway_url'] = _gateway_health_base_url()
+            return result
+    except Exception as e:
+        logger.debug('gateway health probe failed: %s', e)
+
+    # ── Secondary: disk-derived fallback ───────────────────────────────────
     if agent_dir is not None:
+        # 1. VERSION file
         version_file = agent_dir / "VERSION"
         try:
             if version_file.exists():
                 text = version_file.read_text(encoding='utf-8').strip()
                 if text:
-                    return text
+                    result['version'] = text
+                    result['provenance'] = 'disk'
+                    result['source'] = 'version_file'
+                    result['warning'] = 'Gateway unreachable; showing disk version'
+                    return result
         except Exception:
             pass
 
-        # Fallback: infer from git describe when the checkout exists but no VERSION
-        # file is available (common in source checkouts and developer environments).
+        # 2. git describe
         if agent_dir.exists():
-            # Symmetric with _detect_webui_version() above — `--dirty` flags a
-            # locally-modified checkout so operators can see when their agent has
-            # uncommitted changes vs a clean tag. Per Opus advisor on stage-293.
-            out = _describe_git_version(agent_dir)
-            if out:
-                return out
+            try:
+                out = _describe_git_version(agent_dir)
+                if out:
+                    result['version'] = out
+                    result['provenance'] = 'disk'
+                    result['source'] = 'git_describe'
+                    result['warning'] = 'Gateway unreachable; showing disk version'
+                    return result
+            except Exception:
+                pass
 
-            # Docker two-container deployments often mount a copied agent source
-            # tree without .git metadata or a VERSION file.  The package version
-            # still lives in hermes_cli/__init__.py, so prefer that before giving
-            # up or relying on a live gateway probe.
-            source_version = _read_agent_source_version(agent_dir)
-            if source_version:
-                return source_version
+            # 3. package __version__
+            try:
+                source_version = _read_agent_source_version(agent_dir)
+                if source_version:
+                    result['version'] = source_version
+                    result['provenance'] = 'disk'
+                    result['source'] = 'package_init'
+                    result['warning'] = 'Gateway unreachable; showing disk version'
+                    return result
+            except Exception:
+                pass
 
-    gateway_version = _detect_agent_version_from_gateway_health()
-    if gateway_version:
-        return gateway_version
+    # ── Nothing worked ────────────────────────────────────────────────────
+    result['provenance'] = 'unknown'
+    result['error'] = 'Neither gateway health nor disk sources provided a version'
+    return result
 
-    return 'not detected'
+
+# ── Version cache (HGRC-015) ──────────────────────────────────────────────
+# Per-request cache with short TTL. The old AGENT_VERSION import-time constant
+# is replaced with get_agent_version() which refreshes after TTL expires.
+
+_AGENT_VERSION_CACHE_TTL = 60  # seconds
+_AGENT_VERSION_CACHE: dict = {
+    'version': 'unknown',
+    'provenance': 'unknown',
+    'source': None,
+    'cached_at': 0.0,
+    'ttl_seconds': _AGENT_VERSION_CACHE_TTL,
+    'warning': None,
+    'agent_dir': None,
+    'gateway_url': None,
+    'error': None,
+}
+_AGENT_VERSION_CACHE_LOCK = threading.Lock()
 
 
-# Resolved once at import time — tags cannot change without a process restart.
+def get_agent_version() -> dict:
+    """Return the cached agent-version payload, refreshing if expired.
+
+    Refreshes by calling _detect_agent_version() which probes live gateway
+    health first, then disk fallback. Cache TTL is short (60s) so version
+    changes after restart are reflected quickly without flooding the endpoint.
+    """
+    now = time.monotonic()
+    with _AGENT_VERSION_CACHE_LOCK:
+        cached = dict(_AGENT_VERSION_CACHE)
+    age = now - cached.get('cached_at', 0)
+    if age >= _AGENT_VERSION_CACHE_TTL:
+        fresh = _detect_agent_version()
+        with _AGENT_VERSION_CACHE_LOCK:
+            _AGENT_VERSION_CACHE.update(fresh)
+            _AGENT_VERSION_CACHE['cached_at'] = now
+            cached = dict(_AGENT_VERSION_CACHE)
+    return cached
+
+
+# Legacy compatibility: keep AGENT_VERSION as a string for any code that
+# imports it. Updated lazily via cache on access.
+def AGENT_VERSION_legacy() -> str:
+    """Return just the version string for backward compatibility."""
+    return get_agent_version()['version']
+
+
+# Module-level constant — calls cache on first access to keep imports safe.
+# Subsequent accesses use cached value until TTL expires.
 WEBUI_VERSION: str = _detect_webui_version()
-AGENT_VERSION: str = _detect_agent_version()
 
 
 def _normalize_remote_url(remote_url):
