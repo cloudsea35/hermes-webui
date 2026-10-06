@@ -1732,6 +1732,7 @@ def _run_cron_job_in_profile_subprocess(job, execution_profile_home):
     result_timeout = _cron_subprocess_result_timeout_seconds(job)
     status = "error"
     payload = ["cron run subprocess failed before producing a result", ""]
+    result_received = False
     try:
         try:
             # Drain the potentially large pickled result before joining.  If the
@@ -1739,6 +1740,7 @@ def _run_cron_job_in_profile_subprocess(job, execution_profile_home):
             # deadlock while the child's feeder thread waits for the parent to
             # read from the pipe.
             status, *payload = result_queue.get(timeout=result_timeout)
+            result_received = True
         except queue.Empty:
             status = "error"
             if process.is_alive():
@@ -1756,14 +1758,24 @@ def _run_cron_job_in_profile_subprocess(job, execution_profile_home):
         finally:
             process.join(timeout=5)
             if process.is_alive():
+                if result_received:
+                    logger.warning(
+                        "Manual cron subprocess for job %s remained alive after returning "
+                        "a result; forcing cleanup without changing the returned run outcome",
+                        (job or {}).get("id", "?"),
+                    )
                 process.terminate()
                 process.join(timeout=5)
-                if status == "ok":
-                    status = "error"
-                    payload = [
-                        "cron run subprocess did not exit after returning a result",
-                        "",
-                    ]
+                if process.is_alive():
+                    kill = getattr(process, "kill", None)
+                    if callable(kill):
+                        kill()
+                        process.join(timeout=5)
+                if process.is_alive():
+                    logger.error(
+                        "Manual cron subprocess for job %s remained alive after forced cleanup",
+                        (job or {}).get("id", "?"),
+                    )
     finally:
         result_queue.close()
         result_queue.join_thread()
